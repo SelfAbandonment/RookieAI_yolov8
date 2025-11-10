@@ -217,7 +217,7 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
 
 
 def open_screen_video(shared_frame, frame_available_event, videoSignal_stop_queue):
-    """（多进程）打开屏幕捕获并显示视频帧，限制截图速率为100 FPS"""
+    """多进程打开屏幕捕获并显示视频帧，限制截图速率为100 FPS"""
     # 清空 videoSignal_stop_queue 队列
     while not videoSignal_stop_queue.empty():
         try:

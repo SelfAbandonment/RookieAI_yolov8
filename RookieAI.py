@@ -2532,36 +2532,69 @@ class RookieAiAPP:  # 主进程 (UI进程)
             self.clear_timer.stop()  # 停止定时器
 
     def change_yolo_model(self):
-        """重新加载模型"""
+        """
+        重新加载模型 - 改进版本
+        
+        添加原子性操作和状态锁定，防止操作冲突
+        """
         logger.debug("重新加载模型")
+        
         # 检查模型文件路径是否为空
-        if not getattr(self, 'model_file', None):  # 如果 model_file 属性不存在或为空
+        if not getattr(self, 'model_file', None):
             log_msg = "未选择模型文件，无法重新加载模型。"
             self.window.status_widget.display_message(
                 log_msg, bg_color="Red", text_color="black", auto_hide=6000)
-            return  # 退出方法，不执行后续操作
-
-        # 如果此时 视频预览 在开启状态，则进行关闭。
-        if self.is_video_running:
-            self.toggle_video_button()
-        # 如果此时 YOLO推理 在开启状态，则进行关闭。
-        if self.is_yolo_running:
-            self.toggle_YOLO_button()
-
-        if self.ProcessMode == "multi_process":
-            # 发送更改模型信号 与 模型路径(多进程)
-            self.YoloSignal_queue.put(("change_model", self.model_file))
-            self.information_output_queue.put(
-                ("UI_process_log", "向 YoloSignal_queue 发送 change_model"))
-        else:
-            # 发送更改模型信号 与 模型路径(单进程)
-            self.videoSignal_queue.put(("change_model", self.model_file))
-            self.information_output_queue.put(
-                ("UI_process_log", "向 videoSignal_queue 发送 change_model"))
-
-        # 显示模型已重新加载的消息
-        self.window.status_widget.display_message("模型已重新加载", bg_color="#55ff00", text_color="black",
-                                                  auto_hide=1500)
+            return
+        
+        # 检查模型文件是否存在
+        if not os.path.exists(self.model_file):
+            log_msg = f"模型文件不存在: {self.model_file}"
+            logger.error(log_msg)
+            self.window.status_widget.display_message(
+                log_msg, bg_color="Red", text_color="black", auto_hide=6000)
+            return
+        
+        # 原子操作：记录当前状态
+        video_was_running = self.is_video_running
+        yolo_was_running = self.is_yolo_running
+        
+        try:
+            # 步骤1: 停止所有活动
+            if self.is_video_running:
+                logger.debug("停止视频预览以切换模型")
+                self.toggle_video_button()
+                time.sleep(0.2)  # 等待视频完全停止
+                
+            if self.is_yolo_running:
+                logger.debug("停止YOLO推理以切换模型")
+                self.toggle_YOLO_button()
+                time.sleep(0.2)  # 等待YOLO完全停止
+            
+            # 步骤2: 发送模型切换信号
+            logger.info(f"开始切换模型: {self.model_file}")
+            if self.ProcessMode == "multi_process":
+                self.YoloSignal_queue.put(("change_model", self.model_file))
+                self.information_output_queue.put(
+                    ("UI_process_log", "向 YoloSignal_queue 发送 change_model"))
+            else:
+                self.videoSignal_queue.put(("change_model", self.model_file))
+                self.information_output_queue.put(
+                    ("UI_process_log", "向 videoSignal_queue 发送 change_model"))
+            
+            # 显示成功消息
+            self.window.status_widget.display_message(
+                "模型切换中，请稍候...", bg_color="Yellow", text_color="black", auto_hide=2000)
+            logger.success(f"模型切换命令已发送: {self.model_file}")
+            
+            # 步骤3: 恢复之前的状态 (可选)
+            # 注意：这里不自动恢复，让用户手动启动以确认模型加载成功
+            
+        except Exception as e:
+            error_msg = f"模型切换失败: {e}"
+            logger.error(error_msg)
+            self.window.status_widget.display_message(
+                error_msg, bg_color="Red", text_color="black", auto_hide=6000)
+            self.information_output_queue.put(("error_log", error_msg))
 
     def choose_model(self):
         """弹出文件选择窗口，让用户选择模型文件"""

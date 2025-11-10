@@ -21,7 +21,9 @@ from PyQt6.QtWidgets import QGraphicsOpacityEffect, QFileDialog, QMessageBox, QS
 from multiprocessing import Pipe, Process, Queue, shared_memory, Event
 from customLib.animated_status import AnimatedStatus  # 导入 带动画的状态提示浮窗 库
 from customLib.automatic_trigger_set_dialog import AutomaticTriggerSetDialog  # 导入自定义设置窗口类
-from Module.const import method_mode
+from Module.const import method_mode, FRAME_CAPTURE_WIDTH, FRAME_CAPTURE_HEIGHT, DEFAULT_TARGET_FPS, DEFAULT_FRAME_INTERVAL
+from Module.const import DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, DEFAULT_ANIMATION_DURATION, FPS_UPDATE_INTERVAL
+from Module.const import MODEL_WARMUP_CONF, MAX_RETRIES, RETRY_DELAY_BASE, FRAME_TIME_SAMPLES
 from Module.config import Config, Root
 from Module.control import kmNet
 from Module.logger import logger
@@ -30,17 +32,14 @@ import Module.keyboard as keyboard
 import Module.jump_detection as jump_detection
 import Module.announcement
 
-# 视频捕获常量
-CAPTURE_WIDTH = 320
-CAPTURE_HEIGHT = 320
-FRAME_INTERVAL = 0.05  # 20 FPS
-TARGET_FPS = 20
+# 视频捕获常量 (now imported from const.py)
+CAPTURE_WIDTH = FRAME_CAPTURE_WIDTH
+CAPTURE_HEIGHT = FRAME_CAPTURE_HEIGHT
+FRAME_INTERVAL = DEFAULT_FRAME_INTERVAL
+TARGET_FPS = DEFAULT_TARGET_FPS
 
-# UI常量
-DEFAULT_WINDOW_WIDTH = 1290
-DEFAULT_WINDOW_HEIGHT = 585
-ANIMATION_DURATION = 500  # 毫秒
-FPS_UPDATE_INTERVAL = 1.0  # 秒
+# UI常量 (now imported from const.py)
+ANIMATION_DURATION = DEFAULT_ANIMATION_DURATION
 
 # 初始化配置文件
 Config.save()
@@ -53,8 +52,6 @@ def communication_Process(pipe, videoSignal_queue, videoSignal_stop_queue, float
     """
     global video_running
     
-    max_retries = 3
-    retry_delay = 0.1
     consecutive_errors = 0
 
     logger.debug("启动 communication_Process 监听信号...")
@@ -104,18 +101,19 @@ def communication_Process(pipe, videoSignal_queue, videoSignal_stop_queue, float
 
         except (BrokenPipeError, EOFError) as e:
             consecutive_errors += 1
-            logger.error(f"管道通信错误 (尝试 {consecutive_errors}/{max_retries}): {e}")
+            logger.error(f"管道通信错误 (尝试 {consecutive_errors}/{MAX_RETRIES}): {e}")
             
-            if consecutive_errors >= max_retries:
-                logger.fatal(f"管道通信连续失败 {max_retries} 次，退出进程")
+            if consecutive_errors >= MAX_RETRIES:
+                logger.fatal(f"管道通信连续失败 {MAX_RETRIES} 次，退出进程")
                 information_output_queue.put(
                     ("error_log", f"管道通信连续失败，进程已终止"))
                 break
             
-            # 等待后重试
-            time.sleep(retry_delay * consecutive_errors)
+            # 等待后重试 (exponential backoff)
+            retry_delay = RETRY_DELAY_BASE * consecutive_errors
+            time.sleep(retry_delay)
             information_output_queue.put(
-                ("error_log", f"管道通信错误，将在 {retry_delay * consecutive_errors}s 后重试"))
+                ("error_log", f"管道通信错误，将在 {retry_delay}s 后重试"))
                 
         except Exception as e:
             logger.error(f"发生未知错误: {e}")
@@ -230,7 +228,7 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
             temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
             
             # 执行预热推理 (使用较低的置信度以加快速度)
-            _ = model.predict(temp_img, conf=0.01, verbose=False, device="cuda:0")
+            _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device="cuda:0")
             
             warmup_time = time.time() - warmup_start
             logger.info(f"YOLO 模型预热完成，耗时: {warmup_time:.2f}秒")
@@ -319,7 +317,6 @@ def capture_screen_loop(videoSignal_stop_queue, sct, shared_frame, frame_availab
     
     # 性能监控
     frame_times = []
-    max_frame_samples = 100
 
     while True:
         frame_start_time = time.time()
@@ -352,7 +349,7 @@ def capture_screen_loop(videoSignal_stop_queue, sct, shared_frame, frame_availab
         
         # 性能监控
         frame_times.append(elapsed_time)
-        if len(frame_times) > max_frame_samples:
+        if len(frame_times) > FRAME_TIME_SAMPLES:
             frame_times.pop(0)
             avg_time = sum(frame_times) / len(frame_times)
             if avg_time > FRAME_INTERVAL * 1.2:
@@ -522,7 +519,7 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
         logger.debug("开始模型预热...")
         warmup_start = time.time()
         temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
-        _ = model.predict(temp_img, conf=0.01, verbose=False, device="cuda:0")
+        _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device="cuda:0")
         warmup_time = time.time() - warmup_start
         logger.info(f"YOLO 模型预热完成，耗时: {warmup_time:.2f}秒")
         logger.success(f"模型初始化成功 (总耗时: {load_time + warmup_time:.2f}秒)")

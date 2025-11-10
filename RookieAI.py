@@ -30,11 +30,17 @@ import Module.keyboard as keyboard
 import Module.jump_detection as jump_detection
 import Module.announcement
 
-# 常量定义
+# 视频捕获常量
 CAPTURE_WIDTH = 320
 CAPTURE_HEIGHT = 320
 FRAME_INTERVAL = 0.05  # 20 FPS
 TARGET_FPS = 20
+
+# UI常量
+DEFAULT_WINDOW_WIDTH = 1290
+DEFAULT_WINDOW_HEIGHT = 585
+ANIMATION_DURATION = 500  # 毫秒
+FPS_UPDATE_INTERVAL = 1.0  # 秒
 
 # 初始化配置文件
 Config.save()
@@ -1060,10 +1066,10 @@ class RookieAiAPP:  # 主进程 (UI进程)
         self.app = QtWidgets.QApplication(sys.argv)
 
         # 加载主窗口 UI 文件
-        self.window = uic.loadUi(Root / "UI" / 'RookieAiWindow.ui')  # 请确保 Root 已正确定义
-        self.window.setWindowTitle("YOLO识别系统")  # 设置窗口标题
-        self.window.setWindowIcon(QIcon(str(Root / "ico" / "ultralytics-botAvatarSrcUrl-1729379860806.png")))  # 设置窗口图标
-        self.window.setFixedSize(1290, 585)  # 固定窗口大小（可选）
+        self.window = uic.loadUi(Root / "UI" / 'RookieAiWindow.ui')
+        self.window.setWindowTitle("YOLO识别系统")
+        self.window.setWindowIcon(QIcon(str(Root / "ico" / "ultralytics-botAvatarSrcUrl-1729379860806.png")))
+        self.window.setFixedSize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
         self.automaticTriggerSetDialog = AutomaticTriggerSetDialog(self.window)
         self.automaticTriggerSetDialog.setModal(True)  # 设置为模态窗口
@@ -1406,13 +1412,13 @@ class RookieAiAPP:  # 主进程 (UI进程)
         # 初始化 视频显示画面更新 定时器
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_video_frame)  # 每次超时调用更新函数
-        self.timer.start(5)  # 约每30毫秒更新一次
+        self.timer.start(5)  # 约每5毫秒更新一次
 
-        # 初始化 帧 计数
+        # 初始化 FPS 计数
         self.fps = 0
         self.frame_count = 0
         self.start_time = time.time()
-        self.fps_update_interval = 0.5  # 设置FPS更新间隔（秒）
+        self.fps_update_interval = FPS_UPDATE_INTERVAL
 
         # 初始化 YOLO 处理状态
         self.is_yolo_running = False
@@ -2126,17 +2132,17 @@ class RookieAiAPP:  # 主进程 (UI进程)
             self.accessibilityProcessSignal_queue.put(("automatic_trigger_switch", False))
 
     def reset_window_size(self):
-        """重置窗口大小为 (1290, 585)"""
-        target_size = QSize(1290, 585)
+        """重置窗口大小为默认尺寸"""
+        target_size = QSize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
         if self.window.unlockWindowSizeCheckBox.isChecked():
-            # 如果窗口大小已解锁，直接调整窗口大小
+            # 窗口大小已解锁，直接调整
             self.window.resize(target_size)
         else:
-            # 如果窗口大小已锁定，设置固定大小为目标大小
+            # 窗口大小已锁定，设置固定大小
             self.window.setFixedSize(target_size)
 
-        # 如果需要在重置大小后更新大小策略，可以在这里进行
+        # 更新大小策略
         if self.window.unlockWindowSizeCheckBox.isChecked():
             self.window.setSizePolicy(
                 QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -2270,24 +2276,22 @@ class RookieAiAPP:  # 主进程 (UI进程)
         # 计算结束位置，使面板移出屏幕（左侧）
         end_pos = QPoint(-self.window.settingsPanel.width(), start_pos.y())
 
-        # 创建一个属性动画，控制设置面板的位置
+        # 创建属性动画，控制设置面板的位置
         self.window.animation = QPropertyAnimation(
             self.window.settingsPanel, b"pos")
-        self.window.animation.setDuration(500)  # 动画持续时间为 500 毫秒
-        self.window.animation.setStartValue(start_pos)  # 动画开始位置
-        self.window.animation.setEndValue(end_pos)  # 动画结束位置
-        self.window.animation.setEasingCurve(
-            QEasingCurve.Type.InQuad)  # 设置动画效果为缓入
+        self.window.animation.setDuration(ANIMATION_DURATION)
+        self.window.animation.setStartValue(start_pos)
+        self.window.animation.setEndValue(end_pos)
+        self.window.animation.setEasingCurve(QEasingCurve.Type.InQuad)
 
         # 启动面板位置动画
         self.window.animation.start()
 
         # 设置遮罩动画属性
-        self.window.overlay_animation.setDuration(500)  # 遮罩动画持续时间为 500 毫秒
-        self.window.overlay_animation.setStartValue(1)  # 遮罩的初始透明度
-        self.window.overlay_animation.setEndValue(0)  # 遮罩的结束透明度（完全透明）
-        self.window.overlay_animation.setEasingCurve(
-            QEasingCurve.Type.InQuad)  # 设置动画效果为缓入
+        self.window.overlay_animation.setDuration(ANIMATION_DURATION)
+        self.window.overlay_animation.setStartValue(1)
+        self.window.overlay_animation.setEndValue(0)
+        self.window.overlay_animation.setEasingCurve(QEasingCurve.Type.InQuad)
 
         # 启动遮罩透明度动画
         self.window.overlay_animation.start()
@@ -2307,11 +2311,10 @@ class RookieAiAPP:  # 主进程 (UI进程)
         self.window.overlay.show()
 
         # 设置遮罩动画属性
-        self.window.overlay_animation.setDuration(500)  # 遮罩动画持续时间为 500 毫秒
-        self.window.overlay_animation.setStartValue(0)  # 遮罩的初始透明度（完全透明）
-        self.window.overlay_animation.setEndValue(1)  # 遮罩的结束透明度（完全不透明）
-        self.window.overlay_animation.setEasingCurve(
-            QEasingCurve.Type.OutQuad)  # 设置动画效果为缓出
+        self.window.overlay_animation.setDuration(ANIMATION_DURATION)
+        self.window.overlay_animation.setStartValue(0)
+        self.window.overlay_animation.setEndValue(1)
+        self.window.overlay_animation.setEasingCurve(QEasingCurve.Type.OutQuad)
 
         # 启动遮罩透明度动画
         self.window.overlay_animation.start()
@@ -2330,14 +2333,13 @@ class RookieAiAPP:  # 主进程 (UI进程)
         # 计算结束位置，使面板从左侧进入屏幕
         end_pos = QPoint(0, start_pos.y())
 
-        # 创建一个属性动画，控制设置面板的位置
+        # 创建属性动画，控制设置面板的位置
         self.window.animation = QPropertyAnimation(
             self.window.settingsPanel, b"pos")
-        self.window.animation.setDuration(500)  # 动画持续时间为 500 毫秒
-        self.window.animation.setStartValue(start_pos)  # 动画开始位置
-        self.window.animation.setEndValue(end_pos)  # 动画结束位置
-        self.window.animation.setEasingCurve(
-            QEasingCurve.Type.OutQuad)  # 设置动画效果为缓出
+        self.window.animation.setDuration(ANIMATION_DURATION)
+        self.window.animation.setStartValue(start_pos)
+        self.window.animation.setEndValue(end_pos)
+        self.window.animation.setEasingCurve(QEasingCurve.Type.OutQuad)
 
         # 启动面板位置动画
         self.window.animation.start()

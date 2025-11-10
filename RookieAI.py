@@ -103,33 +103,32 @@ def start_capture_process_multie(shm_name, frame_shape, frame_dtype, frame_avail
                                  videoSignal_queue, videoSignal_stop_queue, pipe, information_output_queue,
                                  ProcessMode):
     """
-    （多进程）
-    子进程视频信号获取逻辑 \n
-    接收内容:\n
-    1.start_video \n
-    2.stop_video
+    多进程模式下的视频信号获取逻辑
+    
+    接收内容:
+    - start_video: 开始视频捕获
+    - stop_video: 停止视频捕获
+    - change_model: 重新加载模型
     """
-
     # 连接到共享内存
     existing_shm = shared_memory.SharedMemory(name=shm_name)
     shared_frame = np.ndarray(
         frame_shape, dtype=frame_dtype, buffer=existing_shm.buf)
 
-    logger.debug("视频信号获取进程已启动。")
+    logger.debug("视频信号获取进程已启动")
     while True:
         try:
             message = videoSignal_queue.get(timeout=1)
             command, information = message
             logger.debug(f"接收到命令: {command}, 内容: {information}")
             information_output_queue.put(
-                ("video_signal_acquisition_log", message))  # 调试信息输出
+                ("video_signal_acquisition_log", message))
 
             if command == "start_video":
-                logger.debug("进程模式选择")
-                logger.info("进程模式：", ProcessMode)
+                logger.info(f"启动视频捕获 - 进程模式: {ProcessMode}")
                 open_screen_video(
                     shared_frame, frame_available_event, videoSignal_stop_queue)
-            if command == "change_model":
+            elif command == "change_model":
                 logger.info("正在重新加载模型")
                 model_file = information
                 model = YOLO(model_file)
@@ -150,38 +149,56 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
     1.start_video
     2.stop_video
     """
-    logger.debug("视频信号获取进程已启动。")
+    logger.debug("视频信号获取进程已启动")
 
     def initialization_Yolo(model_file, information_output_queue):
-        """初始化 YOLO 并进行一次模拟推理"""
+        """
+        初始化 YOLO 并进行预热推理
+        
+        Args:
+            model_file: 模型文件路径
+            information_output_queue: 信息输出队列
+            
+        Returns:
+            YOLO模型对象
+            
+        Raises:
+            FileNotFoundError: 当模型文件不存在时
+        """
         try:
             # 检查模型文件是否存在
             if not os.path.exists(model_file):
-                logger.warn(f"模型文件 '{model_file}' 未找到，尝试使用默认模型 'yolov8n.pt'。")
+                logger.warn(f"模型文件 '{model_file}' 未找到，尝试使用默认模型 'yolov8n.pt'")
                 information_output_queue.put(
-                    ("log_output_main", f"模型文件 '{model_file}' 未找到，使用默认模型 yolov8n.pt'。"))
+                    ("log_output_main", f"模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'"))
                 model_file = "yolov8n.pt"
-                log_message = f"[ERROR]一般错误，模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'。"
-                # 选定文件未能找到，黄色报错
+                log_message = f"[ERROR]一般错误，模型文件未找到，使用默认模型 'yolov8n.pt'"
                 pipe_parent.send(("loading_error", log_message))
+                
                 if not os.path.exists(model_file):
-                    logger.fatal(f"致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
-                    log_message = f"[ERROR]致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。"
-                    # 默认文件也未找到，红色报错
-                    pipe_parent.send(("red_error", log_message))
-                    raise FileNotFoundError(
-                        f"默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
+                    error_msg = f"致命错误，默认模型文件 '{model_file}' 也未找到"
+                    logger.fatal(error_msg)
+                    pipe_parent.send(("red_error", f"[ERROR]{error_msg}"))
+                    raise FileNotFoundError(f"默认模型文件 '{model_file}' 不存在，请确保模型文件存在")
 
-            model = YOLO(model_file)  # 加载 YOLO 模型
-            logger.info(f"YOLO 模型 '{model_file}' 已加载。")
-            # 创建一张临时图像（纯色或随机噪声）用于预热
-            temp_img = np.zeros((320, 320, 3), dtype=np.uint8)  # 修改为640x640
+            model = YOLO(model_file)
+            logger.info(f"YOLO 模型 '{model_file}' 已加载")
+            
+            # 使用临时图像预热模型
+            temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
             temp_img_path = "temp_init_image.jpg"
             cv2.imwrite(temp_img_path, temp_img)
-            # 执行一次模拟推理
+            
+            # 执行预热推理
             model.predict(temp_img_path, conf=0.5)
-            logger.debug("YOLO 模型已预热完成。")
-            os.remove(temp_img_path)  # 删除临时图像
+            logger.debug("YOLO 模型预热完成")
+            
+            # 清理临时文件
+            try:
+                os.remove(temp_img_path)
+            except OSError:
+                pass  # 忽略删除失败
+                
             return model
         except Exception as e:
             logger.error(f"YOLO 初始化失败: {e}")
@@ -431,30 +448,30 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
         frame_shape, dtype=frame_dtype, buffer=existing_shm.buf)
 
     try:
-        # 初始化 YOLO
-        # 检查模型文件是否存在，如果不存在则使用默认模型
+        # 初始化 YOLO 模型
         if not os.path.exists(model_file):
             logger.warn(f"模型文件 '{model_file}' 未找到，尝试使用默认模型 'yolov8n.pt'")
             information_output_queue.put(
-                ("log_output_main", f"模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'。"))
-            log_message = f"[ERROR]一般错误，模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'。"
-            pipe_parent.send(("loading_error", log_message))  # 选定文件未能找到，黄色报错
+                ("log_output_main", f"模型文件未找到，使用默认模型 'yolov8n.pt'"))
+            log_message = "[ERROR]一般错误，模型文件未找到，使用默认模型 'yolov8n.pt'"
+            pipe_parent.send(("loading_error", log_message))
             model_file = "yolov8n.pt"
+            
             if not os.path.exists(model_file):
-                logger.fatal(f"致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
-                log_message = f"[ERROR]致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。"
-                pipe_parent.send(("red_error", log_message))  # 默认文件也未找到，红色报错
-                raise FileNotFoundError(
-                    f"默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
+                error_msg = f"致命错误，默认模型文件 '{model_file}' 也未找到"
+                logger.fatal(error_msg)
+                pipe_parent.send(("red_error", f"[ERROR]{error_msg}"))
+                raise FileNotFoundError(f"默认模型文件不存在: {model_file}")
+                
         model = YOLO(model_file)
-        logger.debug("YOLO 模型已加载。")
+        logger.info(f"YOLO 模型已加载: {model_file}")
 
-        # 进行一次模拟推理以预热模型
-        temp_img = np.zeros((320, 320, 3), dtype=np.uint8)
+        # 使用临时图像预热模型
+        temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
         model.predict(temp_img, conf=0.5)
-        logger.debug("YOLO 模型已预热完成。")
+        logger.debug("YOLO 模型预热完成")
 
-        pipe_parent.send(("loading_complete", True))  # 软件初始化加载完毕标志
+        pipe_parent.send(("loading_complete", True))
 
         while True:
             # 检查 YoloSignal_queue 中的信号

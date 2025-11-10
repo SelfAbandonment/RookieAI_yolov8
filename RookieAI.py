@@ -30,6 +30,18 @@ import Module.keyboard as keyboard
 import Module.jump_detection as jump_detection
 import Module.announcement
 
+# 视频捕获常量
+CAPTURE_WIDTH = 320
+CAPTURE_HEIGHT = 320
+FRAME_INTERVAL = 0.05  # 20 FPS
+TARGET_FPS = 20
+
+# UI常量
+DEFAULT_WINDOW_WIDTH = 1290
+DEFAULT_WINDOW_HEIGHT = 585
+ANIMATION_DURATION = 500  # 毫秒
+FPS_UPDATE_INTERVAL = 1.0  # 秒
+
 # 初始化配置文件
 Config.save()
 
@@ -97,33 +109,32 @@ def start_capture_process_multie(shm_name, frame_shape, frame_dtype, frame_avail
                                  videoSignal_queue, videoSignal_stop_queue, pipe, information_output_queue,
                                  ProcessMode):
     """
-    （多进程）
-    子进程视频信号获取逻辑 \n
-    接收内容:\n
-    1.start_video \n
-    2.stop_video
+    多进程模式下的视频信号获取逻辑
+    
+    接收内容:
+    - start_video: 开始视频捕获
+    - stop_video: 停止视频捕获
+    - change_model: 重新加载模型
     """
-
     # 连接到共享内存
     existing_shm = shared_memory.SharedMemory(name=shm_name)
     shared_frame = np.ndarray(
         frame_shape, dtype=frame_dtype, buffer=existing_shm.buf)
 
-    logger.debug("视频信号获取进程已启动。")
+    logger.debug("视频信号获取进程已启动")
     while True:
         try:
             message = videoSignal_queue.get(timeout=1)
             command, information = message
             logger.debug(f"接收到命令: {command}, 内容: {information}")
             information_output_queue.put(
-                ("video_signal_acquisition_log", message))  # 调试信息输出
+                ("video_signal_acquisition_log", message))
 
             if command == "start_video":
-                logger.debug("进程模式选择")
-                logger.info("进程模式：", ProcessMode)
+                logger.info(f"启动视频捕获 - 进程模式: {ProcessMode}")
                 open_screen_video(
                     shared_frame, frame_available_event, videoSignal_stop_queue)
-            if command == "change_model":
+            elif command == "change_model":
                 logger.info("正在重新加载模型")
                 model_file = information
                 model = YOLO(model_file)
@@ -144,38 +155,56 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
     1.start_video
     2.stop_video
     """
-    logger.debug("视频信号获取进程已启动。")
+    logger.debug("视频信号获取进程已启动")
 
     def initialization_Yolo(model_file, information_output_queue):
-        """初始化 YOLO 并进行一次模拟推理"""
+        """
+        初始化 YOLO 并进行预热推理
+        
+        Args:
+            model_file: 模型文件路径
+            information_output_queue: 信息输出队列
+            
+        Returns:
+            YOLO模型对象
+            
+        Raises:
+            FileNotFoundError: 当模型文件不存在时
+        """
         try:
             # 检查模型文件是否存在
             if not os.path.exists(model_file):
-                logger.warn(f"模型文件 '{model_file}' 未找到，尝试使用默认模型 'yolov8n.pt'。")
+                logger.warn(f"模型文件 '{model_file}' 未找到，尝试使用默认模型 'yolov8n.pt'")
                 information_output_queue.put(
-                    ("log_output_main", f"模型文件 '{model_file}' 未找到，使用默认模型 yolov8n.pt'。"))
+                    ("log_output_main", f"模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'"))
                 model_file = "yolov8n.pt"
-                log_message = f"[ERROR]一般错误，模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'。"
-                # 选定文件未能找到，黄色报错
+                log_message = f"[ERROR]一般错误，模型文件未找到，使用默认模型 'yolov8n.pt'"
                 pipe_parent.send(("loading_error", log_message))
+                
                 if not os.path.exists(model_file):
-                    logger.fatal(f"致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
-                    log_message = f"[ERROR]致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。"
-                    # 默认文件也未找到，红色报错
-                    pipe_parent.send(("red_error", log_message))
-                    raise FileNotFoundError(
-                        f"默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
+                    error_msg = f"致命错误，默认模型文件 '{model_file}' 也未找到"
+                    logger.fatal(error_msg)
+                    pipe_parent.send(("red_error", f"[ERROR]{error_msg}"))
+                    raise FileNotFoundError(f"默认模型文件 '{model_file}' 不存在，请确保模型文件存在")
 
-            model = YOLO(model_file)  # 加载 YOLO 模型
-            logger.info(f"YOLO 模型 '{model_file}' 已加载。")
-            # 创建一张临时图像（纯色或随机噪声）用于预热
-            temp_img = np.zeros((320, 320, 3), dtype=np.uint8)  # 修改为640x640
+            model = YOLO(model_file)
+            logger.info(f"YOLO 模型 '{model_file}' 已加载")
+            
+            # 使用临时图像预热模型
+            temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
             temp_img_path = "temp_init_image.jpg"
             cv2.imwrite(temp_img_path, temp_img)
-            # 执行一次模拟推理
+            
+            # 执行预热推理
             model.predict(temp_img_path, conf=0.5)
-            logger.debug("YOLO 模型已预热完成。")
-            os.remove(temp_img_path)  # 删除临时图像
+            logger.debug("YOLO 模型预热完成")
+            
+            # 清理临时文件
+            try:
+                os.remove(temp_img_path)
+            except OSError:
+                pass  # 忽略删除失败
+                
             return model
         except Exception as e:
             logger.error(f"YOLO 初始化失败: {e}")
@@ -217,78 +246,74 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
 
 
 def open_screen_video(shared_frame, frame_available_event, videoSignal_stop_queue):
-    """多进程打开屏幕捕获并显示视频帧，限制截图速率为100 FPS"""
-    # 清空 videoSignal_stop_queue 队列
+    """多进程打开屏幕捕获并显示视频帧"""
+    # 清空队列
     while not videoSignal_stop_queue.empty():
         try:
             videoSignal_stop_queue.get_nowait()
         except Exception:
             break
+    
     with mss.mss() as sct:
-        _extracted_from_open_screen_video_11(
-            videoSignal_stop_queue, sct, shared_frame, frame_available_event
-        )
+        capture_screen_loop(videoSignal_stop_queue, sct, shared_frame, frame_available_event)
 
 
-# TODO Rename this here and in `open_screen_video`
-def _extracted_from_open_screen_video_11(videoSignal_stop_queue, sct, shared_frame, frame_available_event):
+def capture_screen_loop(videoSignal_stop_queue, sct, shared_frame, frame_available_event):
+    """
+    屏幕捕获循环函数
+    
+    持续捕获屏幕中心区域并写入共享内存
+    
+    Args:
+        videoSignal_stop_queue: 停止信号队列
+        sct: MSS屏幕截图对象
+        shared_frame: 共享内存帧数组
+        frame_available_event: 帧可用事件
+    """
     # 获取屏幕分辨率
     screen_width, screen_height = pyautogui.size()
-    logger.info("屏幕分辨率:", screen_width, screen_height)
+    logger.info(f"屏幕分辨率: {screen_width}x{screen_height}")
 
-    # 计算中心区域 320x320 的截取范围
-    capture_width, capture_height = 320, 320
-    left = (screen_width - capture_width) // 2
-    top = (screen_height - capture_height) // 2
+    # 计算中心区域的截取范围
+    left = (screen_width - CAPTURE_WIDTH) // 2
+    top = (screen_height - CAPTURE_HEIGHT) // 2
     capture_area = {
         "top": top,
         "left": left,
-        "width": capture_width,
-        "height": capture_height
+        "width": CAPTURE_WIDTH,
+        "height": CAPTURE_HEIGHT
     }
 
-    # 初始化 'frame' 以避免引用前未赋值
-    frame = np.zeros((capture_height, capture_width, 3), dtype=np.uint8)
-
-    frame_interval = 0.05
-
     while True:
-        frame_start_time = time.time()  # 记录帧开始时间
+        frame_start_time = time.time()
 
-        # 检查是否收到停止信号
+        # 检查停止信号
         if not videoSignal_stop_queue.empty():
             command, _ = videoSignal_stop_queue.get()
-            logger.debug(f"videoSignal_stop_queue（多进程） 队列接收信息 {command}")
             if command == 'stop_video':
                 logger.debug("停止屏幕捕获")
-                break  # 退出循环
+                break
 
         # 获取指定区域的截图
         img = sct.grab(capture_area)
 
-        # 使用 numpy.frombuffer 直接转换为数组，避免数据拷贝
-        frame = np.frombuffer(img.rgb, dtype=np.uint8)
-        frame = frame.reshape((img.height, img.width, 3))
-
-        # 转换颜色空间，从 BGRA 到 RGB
+        # 直接转换为numpy数组，避免数据拷贝
+        frame = np.frombuffer(img.rgb, dtype=np.uint8).reshape((img.height, img.width, 3))
+        
+        # 转换颜色空间
         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
 
-        # 将视频帧放入共享内存
+        # 写入共享内存
         np.copyto(shared_frame, frame)
         frame_available_event.set()
 
-        # 计算已用时间
-        frame_end_time = time.time()
-        elapsed_time = frame_end_time - frame_start_time
-
-        # 计算剩余时间
-        remaining_time = frame_interval - elapsed_time
+        # 帧率控制
+        elapsed_time = time.time() - frame_start_time
+        remaining_time = FRAME_INTERVAL - elapsed_time
         if remaining_time > 0:
             time.sleep(remaining_time)
-        else:
-            # 如果处理时间超过了帧间隔，可能需要记录或优化
-            logger.warn(
-                f"视频帧处理时间 {elapsed_time:.4f} 秒超过目标间隔 {frame_interval:.4f} 秒")
+        elif elapsed_time > FRAME_INTERVAL * 1.5:  # 仅在严重超时时警告
+            logger.warn(f"帧处理超时: {elapsed_time:.4f}秒 (目标: {FRAME_INTERVAL:.4f}秒)")
 
 
 def screen_capture_and_yolo_processing(processedVideo_queue, videoSignal_stop_queue, YoloSignal_queue, pipe_parent,
@@ -322,18 +347,17 @@ def screen_capture_and_yolo_processing(processedVideo_queue, videoSignal_stop_qu
             break
 
     with mss.mss(backend='directx') as sct:
-        # 获取屏幕分辨率
+        # 获取屏幕分辨率并计算中心区域
         screen_width, screen_height = pyautogui.size()
-        logger.info("屏幕分辨率:", screen_width, screen_height)
-        # 计算中心区域 320x320 的截取范围
-        capture_width, capture_height = 320, 320
-        left = (screen_width - capture_width) // 2
-        top = (screen_height - capture_height) // 2
+        logger.info(f"屏幕分辨率: {screen_width}x{screen_height}")
+        
+        left = (screen_width - CAPTURE_WIDTH) // 2
+        top = (screen_height - CAPTURE_HEIGHT) // 2
         capture_area = {
             "top": top,
             "left": left,
-            "width": capture_width,
-            "height": capture_height
+            "width": CAPTURE_WIDTH,
+            "height": CAPTURE_HEIGHT
         }
         while True:
             try:
@@ -430,30 +454,30 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
         frame_shape, dtype=frame_dtype, buffer=existing_shm.buf)
 
     try:
-        # 初始化 YOLO
-        # 检查模型文件是否存在，如果不存在则使用默认模型
+        # 初始化 YOLO 模型
         if not os.path.exists(model_file):
             logger.warn(f"模型文件 '{model_file}' 未找到，尝试使用默认模型 'yolov8n.pt'")
             information_output_queue.put(
-                ("log_output_main", f"模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'。"))
-            log_message = f"[ERROR]一般错误，模型文件 '{model_file}' 未找到，使用默认模型 'yolov8n.pt'。"
-            pipe_parent.send(("loading_error", log_message))  # 选定文件未能找到，黄色报错
+                ("log_output_main", f"模型文件未找到，使用默认模型 'yolov8n.pt'"))
+            log_message = "[ERROR]一般错误，模型文件未找到，使用默认模型 'yolov8n.pt'"
+            pipe_parent.send(("loading_error", log_message))
             model_file = "yolov8n.pt"
+            
             if not os.path.exists(model_file):
-                logger.fatal(f"致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
-                log_message = f"[ERROR]致命错误，默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。"
-                pipe_parent.send(("red_error", log_message))  # 默认文件也未找到，红色报错
-                raise FileNotFoundError(
-                    f"默认模型文件 '{model_file}' 也未找到。请确保模型文件存在。")
+                error_msg = f"致命错误，默认模型文件 '{model_file}' 也未找到"
+                logger.fatal(error_msg)
+                pipe_parent.send(("red_error", f"[ERROR]{error_msg}"))
+                raise FileNotFoundError(f"默认模型文件不存在: {model_file}")
+                
         model = YOLO(model_file)
-        logger.debug("YOLO 模型已加载。")
+        logger.info(f"YOLO 模型已加载: {model_file}")
 
-        # 进行一次模拟推理以预热模型
-        temp_img = np.zeros((320, 320, 3), dtype=np.uint8)
+        # 使用临时图像预热模型
+        temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
         model.predict(temp_img, conf=0.5)
-        logger.debug("YOLO 模型已预热完成。")
+        logger.debug("YOLO 模型预热完成")
 
-        pipe_parent.send(("loading_complete", True))  # 软件初始化加载完毕标志
+        pipe_parent.send(("loading_complete", True))
 
         while True:
             # 检查 YoloSignal_queue 中的信号
@@ -1042,10 +1066,10 @@ class RookieAiAPP:  # 主进程 (UI进程)
         self.app = QtWidgets.QApplication(sys.argv)
 
         # 加载主窗口 UI 文件
-        self.window = uic.loadUi(Root / "UI" / 'RookieAiWindow.ui')  # 请确保 Root 已正确定义
-        self.window.setWindowTitle("YOLO识别系统")  # 设置窗口标题
-        self.window.setWindowIcon(QIcon(str(Root / "ico" / "ultralytics-botAvatarSrcUrl-1729379860806.png")))  # 设置窗口图标
-        self.window.setFixedSize(1290, 585)  # 固定窗口大小（可选）
+        self.window = uic.loadUi(Root / "UI" / 'RookieAiWindow.ui')
+        self.window.setWindowTitle("YOLO识别系统")
+        self.window.setWindowIcon(QIcon(str(Root / "ico" / "ultralytics-botAvatarSrcUrl-1729379860806.png")))
+        self.window.setFixedSize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
         self.automaticTriggerSetDialog = AutomaticTriggerSetDialog(self.window)
         self.automaticTriggerSetDialog.setModal(True)  # 设置为模态窗口
@@ -1388,13 +1412,13 @@ class RookieAiAPP:  # 主进程 (UI进程)
         # 初始化 视频显示画面更新 定时器
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_video_frame)  # 每次超时调用更新函数
-        self.timer.start(5)  # 约每30毫秒更新一次
+        self.timer.start(5)  # 约每5毫秒更新一次
 
-        # 初始化 帧 计数
+        # 初始化 FPS 计数
         self.fps = 0
         self.frame_count = 0
         self.start_time = time.time()
-        self.fps_update_interval = 0.5  # 设置FPS更新间隔（秒）
+        self.fps_update_interval = FPS_UPDATE_INTERVAL
 
         # 初始化 YOLO 处理状态
         self.is_yolo_running = False
@@ -1862,30 +1886,30 @@ class RookieAiAPP:  # 主进程 (UI进程)
     def load_settings(self):
         """加载配置文件 settings.json"""
         try:
-            self._extracted_from_load_settings_4()
+            self._load_and_apply_settings()
         except Exception as e:
-            logger.warn("配置文件读取失败:", e)
+            logger.warn(f"配置文件读取失败: {e}")
             self.information_output_queue.put(
                 ("UI_process_log", f"配置文件读取失败: {e}"))
             self.ProcessMode = "single_process"  # 设置默认值
 
-    # TODO Rename this here and in `load_settings`
-    def _extracted_from_load_settings_4(self):
+    def _load_and_apply_settings(self):
+        """加载并应用配置设置"""
         logger.info("配置文件读取成功")
         self.information_output_queue.put(("UI_process_log", "配置文件读取成功"))
 
         '''读取参数'''
         # 获取 "ProcessMode" 的状态
         self.ProcessMode = Config.get("ProcessMode", "single_process")
-        logger.debug("ProcessMode状态:", self.ProcessMode)
+        logger.debug(f"ProcessMode状态: {self.ProcessMode}")
         self.allow_network = Config.get("allow_network", False)
-        logger.debug("是否允许联网:", self.allow_network)
+        logger.debug(f"是否允许联网: {self.allow_network}")
         self.information_output_queue.put(
             ("UI_process_log", f"ProcessMode状态: {self.ProcessMode}"))
         # 获取 "window_always_on_top" 的状态
         self.window_always_on_top = Config.get(
             "window_always_on_top", False)
-        logger.debug("窗口置顶状态:", self.window_always_on_top)
+        logger.debug(f"窗口置顶状态: {self.window_always_on_top}")
         # 获取 "model_file" 模型文件的路径
         self.model_file = Config.get("model_file", "yolov8n.pt")
         logger.debug(f"读取模型文件路径: {self.model_file}")
@@ -2108,17 +2132,17 @@ class RookieAiAPP:  # 主进程 (UI进程)
             self.accessibilityProcessSignal_queue.put(("automatic_trigger_switch", False))
 
     def reset_window_size(self):
-        """重置窗口大小为 (1290, 585)"""
-        target_size = QSize(1290, 585)
+        """重置窗口大小为默认尺寸"""
+        target_size = QSize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
         if self.window.unlockWindowSizeCheckBox.isChecked():
-            # 如果窗口大小已解锁，直接调整窗口大小
+            # 窗口大小已解锁，直接调整
             self.window.resize(target_size)
         else:
-            # 如果窗口大小已锁定，设置固定大小为目标大小
+            # 窗口大小已锁定，设置固定大小
             self.window.setFixedSize(target_size)
 
-        # 如果需要在重置大小后更新大小策略，可以在这里进行
+        # 更新大小策略
         if self.window.unlockWindowSizeCheckBox.isChecked():
             self.window.setSizePolicy(
                 QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -2200,23 +2224,18 @@ class RookieAiAPP:  # 主进程 (UI进程)
     def toggle_YOLO_button(self):
         """切换 YOLO 处理状态并更新按钮文本"""
         if self.is_yolo_running:
-            self._extracted_from_toggle_YOLO_button_5(
-                'YOLO_stop', "开启 YOLO", False, "YOLO 处理已停止。"
-            )
+            self._set_yolo_state('YOLO_stop', "开启 YOLO", False, "YOLO 处理已停止")
         else:
             # 开启 YOLO 处理
             self.req_config()  # 手动请求数据
-            self._extracted_from_toggle_YOLO_button_5(
-                'YOLO_start', "关闭 YOLO", True, "YOLO 处理已启动。"
-            )
+            self._set_yolo_state('YOLO_start', "关闭 YOLO", True, "YOLO 处理已启动")
 
-    # TODO Rename this here and in `toggle_YOLO_button`
-    def _extracted_from_toggle_YOLO_button_5(self, arg0, arg1, arg2, arg3):
-        # 停止 YOLO 处理
-        self.YoloSignal_queue.put((arg0, None))
-        self.window.OpYoloButton.setText(arg1)
-        self.is_yolo_running = arg2
-        logger.debug(arg3)
+    def _set_yolo_state(self, signal, button_text, is_running, log_message):
+        """设置YOLO状态的辅助方法"""
+        self.YoloSignal_queue.put((signal, None))
+        self.window.OpYoloButton.setText(button_text)
+        self.is_yolo_running = is_running
+        logger.debug(log_message)
 
     def toggle_video_button(self):
         """切换视频状态并更新按钮文本"""
@@ -2257,24 +2276,22 @@ class RookieAiAPP:  # 主进程 (UI进程)
         # 计算结束位置，使面板移出屏幕（左侧）
         end_pos = QPoint(-self.window.settingsPanel.width(), start_pos.y())
 
-        # 创建一个属性动画，控制设置面板的位置
+        # 创建属性动画，控制设置面板的位置
         self.window.animation = QPropertyAnimation(
             self.window.settingsPanel, b"pos")
-        self.window.animation.setDuration(500)  # 动画持续时间为 500 毫秒
-        self.window.animation.setStartValue(start_pos)  # 动画开始位置
-        self.window.animation.setEndValue(end_pos)  # 动画结束位置
-        self.window.animation.setEasingCurve(
-            QEasingCurve.Type.InQuad)  # 设置动画效果为缓入
+        self.window.animation.setDuration(ANIMATION_DURATION)
+        self.window.animation.setStartValue(start_pos)
+        self.window.animation.setEndValue(end_pos)
+        self.window.animation.setEasingCurve(QEasingCurve.Type.InQuad)
 
         # 启动面板位置动画
         self.window.animation.start()
 
         # 设置遮罩动画属性
-        self.window.overlay_animation.setDuration(500)  # 遮罩动画持续时间为 500 毫秒
-        self.window.overlay_animation.setStartValue(1)  # 遮罩的初始透明度
-        self.window.overlay_animation.setEndValue(0)  # 遮罩的结束透明度（完全透明）
-        self.window.overlay_animation.setEasingCurve(
-            QEasingCurve.Type.InQuad)  # 设置动画效果为缓入
+        self.window.overlay_animation.setDuration(ANIMATION_DURATION)
+        self.window.overlay_animation.setStartValue(1)
+        self.window.overlay_animation.setEndValue(0)
+        self.window.overlay_animation.setEasingCurve(QEasingCurve.Type.InQuad)
 
         # 启动遮罩透明度动画
         self.window.overlay_animation.start()
@@ -2294,11 +2311,10 @@ class RookieAiAPP:  # 主进程 (UI进程)
         self.window.overlay.show()
 
         # 设置遮罩动画属性
-        self.window.overlay_animation.setDuration(500)  # 遮罩动画持续时间为 500 毫秒
-        self.window.overlay_animation.setStartValue(0)  # 遮罩的初始透明度（完全透明）
-        self.window.overlay_animation.setEndValue(1)  # 遮罩的结束透明度（完全不透明）
-        self.window.overlay_animation.setEasingCurve(
-            QEasingCurve.Type.OutQuad)  # 设置动画效果为缓出
+        self.window.overlay_animation.setDuration(ANIMATION_DURATION)
+        self.window.overlay_animation.setStartValue(0)
+        self.window.overlay_animation.setEndValue(1)
+        self.window.overlay_animation.setEasingCurve(QEasingCurve.Type.OutQuad)
 
         # 启动遮罩透明度动画
         self.window.overlay_animation.start()
@@ -2317,14 +2333,13 @@ class RookieAiAPP:  # 主进程 (UI进程)
         # 计算结束位置，使面板从左侧进入屏幕
         end_pos = QPoint(0, start_pos.y())
 
-        # 创建一个属性动画，控制设置面板的位置
+        # 创建属性动画，控制设置面板的位置
         self.window.animation = QPropertyAnimation(
             self.window.settingsPanel, b"pos")
-        self.window.animation.setDuration(500)  # 动画持续时间为 500 毫秒
-        self.window.animation.setStartValue(start_pos)  # 动画开始位置
-        self.window.animation.setEndValue(end_pos)  # 动画结束位置
-        self.window.animation.setEasingCurve(
-            QEasingCurve.Type.OutQuad)  # 设置动画效果为缓出
+        self.window.animation.setDuration(ANIMATION_DURATION)
+        self.window.animation.setStartValue(start_pos)
+        self.window.animation.setEndValue(end_pos)
+        self.window.animation.setEasingCurve(QEasingCurve.Type.OutQuad)
 
         # 启动面板位置动画
         self.window.animation.start()
@@ -2432,9 +2447,8 @@ class RookieAiAPP:  # 主进程 (UI进程)
         red_line_animation.setStartValue(red_line.geometry())
         target_red_line_geometry = QRect(
             target_button.x(), red_line.y(), target_button.width(), red_line.height())
-        self._extracted_from_on_item_button_clicked_59(
-            red_line_animation, target_red_line_geometry
-        )
+        self._start_animation(red_line_animation, target_red_line_geometry)
+        
         # 移动按钮位置
         for button in all_buttons:
             button_animation = QPropertyAnimation(button, b"geometry")
@@ -2450,16 +2464,14 @@ class RookieAiAPP:  # 主进程 (UI进程)
                 target_geometry = QRect(
                     button.x(), self.button_default_y, button.width(), button.height())
 
-            self._extracted_from_on_item_button_clicked_59(
-                button_animation, target_geometry
-            )
+            self._start_animation(button_animation, target_geometry)
 
-    # TODO Rename this here and in `on_item_button_clicked`
-    def _extracted_from_on_item_button_clicked_59(self, arg0, arg1):
-        arg0.setEndValue(arg1)
-        arg0.setEasingCurve(QEasingCurve.Type.OutQuad)
-        arg0.start()
-        self.item_animations.append(arg0)
+    def _start_animation(self, animation, target_geometry):
+        """启动动画的辅助方法"""
+        animation.setEndValue(target_geometry)
+        animation.setEasingCurve(QEasingCurve.Type.OutQuad)
+        animation.start()
+        self.item_animations.append(animation)
 
     def clear_video_display(self):
         """清空视频显示窗口直到清空干净"""
@@ -2696,9 +2708,7 @@ class RookieAiAPP:  # 主进程 (UI进程)
                                             args=(self.pipe_child, self.videoSignal_queue, self.videoSignal_stop_queue,
                                                   self.floating_information_signal_queue,
                                                   self.information_output_queue,))
-        self._extracted_from_main_65(
-            process_signal_processing, "process_signal_processing 进程创建完毕"
-        )
+        self._start_daemon_process(process_signal_processing, "process_signal_processing 进程创建完毕")
         # 2.视频信号获取进程
         if self.ProcessMode == "multi_process":  # 多进程模式
             target_function = start_capture_process_multie
@@ -2720,7 +2730,7 @@ class RookieAiAPP:  # 主进程 (UI进程)
             raise ValueError(f"未知的 ProcessMode: {self.ProcessMode}")
         # 创建并启动进程
         process_video_signal = Process(target=target_function, args=args)
-        self._extracted_from_main_65(process_video_signal, "process_video_signal 进程创建完毕")
+        self._start_daemon_process(process_video_signal, "process_video_signal 进程创建完毕")
 
         # 3.视频处理进程(仅在多进程时启动)
         if self.ProcessMode == "multi_process":
@@ -2740,11 +2750,11 @@ class RookieAiAPP:  # 主进程 (UI进程)
         process_mouse_move = Process(target=mouse_move_prosses,
                                      args=(box_shm.name, box_lock, self.mouseMoveProssesSignal_queue,
                                            self.accessibilityProcessSignal_queue))
-        self._extracted_from_main_65(process_mouse_move, "process_mouse_move 进程创建完毕")
+        self._start_daemon_process(process_mouse_move, "process_mouse_move 进程创建完毕")
 
         # 5.辅助功能进程
         process_accessibility = Process(target=accessibility_process, args=(self.accessibilityProcessSignal_queue,))
-        self._extracted_from_main_65(process_accessibility, "process_accessibility 进程创建完毕")
+        self._start_daemon_process(process_accessibility, "process_accessibility 进程创建完毕")
 
         # 启动进程后，保存引用
         self.process_signal_processing = process_signal_processing
@@ -2754,11 +2764,11 @@ class RookieAiAPP:  # 主进程 (UI进程)
         '''显示软件页面'''
         self.show()  # 初始化完毕 显示 UI窗口
 
-    # TODO Rename this here and in `main`
-    def _extracted_from_main_65(self, arg0, arg1):
-        arg0.daemon = True
-        arg0.start()
-        self.information_output_queue.put(("UI_process_log", arg1))
+    def _start_daemon_process(self, process, log_message):
+        """启动守护进程的辅助方法"""
+        process.daemon = True
+        process.start()
+        self.information_output_queue.put(("UI_process_log", log_message))
 
 
 if __name__ == '__main__':

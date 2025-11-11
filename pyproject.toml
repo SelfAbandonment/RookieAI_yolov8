@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "opencv-python>=4.11.0.86,<5.0.0.0",
-    "numpy>=1.23.0,<2.2.0",
+    "numpy>=1.23.0,<2.0.0",
     "pyautogui>=0.9.54,<0.10.0",
     "pywin32>=308,<309",
     "mss==6.1.0",

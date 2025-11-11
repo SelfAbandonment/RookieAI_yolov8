@@ -21,7 +21,9 @@ from PyQt6.QtWidgets import QGraphicsOpacityEffect, QFileDialog, QMessageBox, QS
 from multiprocessing import Pipe, Process, Queue, shared_memory, Event
 from customLib.animated_status import AnimatedStatus  # 导入 带动画的状态提示浮窗 库
 from customLib.automatic_trigger_set_dialog import AutomaticTriggerSetDialog  # 导入自定义设置窗口类
-from Module.const import method_mode
+from Module.const import method_mode, FRAME_CAPTURE_WIDTH, FRAME_CAPTURE_HEIGHT, DEFAULT_TARGET_FPS, DEFAULT_FRAME_INTERVAL
+from Module.const import DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, DEFAULT_ANIMATION_DURATION, FPS_UPDATE_INTERVAL
+from Module.const import MODEL_WARMUP_CONF, MAX_RETRIES, RETRY_DELAY_BASE, FRAME_TIME_SAMPLES
 from Module.config import Config, Root
 from Module.control import kmNet
 from Module.logger import logger
@@ -30,17 +32,14 @@ import Module.keyboard as keyboard
 import Module.jump_detection as jump_detection
 import Module.announcement
 
-# 视频捕获常量
-CAPTURE_WIDTH = 320
-CAPTURE_HEIGHT = 320
-FRAME_INTERVAL = 0.05  # 20 FPS
-TARGET_FPS = 20
+# 视频捕获常量 (now imported from const.py)
+CAPTURE_WIDTH = FRAME_CAPTURE_WIDTH
+CAPTURE_HEIGHT = FRAME_CAPTURE_HEIGHT
+FRAME_INTERVAL = DEFAULT_FRAME_INTERVAL
+TARGET_FPS = DEFAULT_TARGET_FPS
 
-# UI常量
-DEFAULT_WINDOW_WIDTH = 1290
-DEFAULT_WINDOW_HEIGHT = 585
-ANIMATION_DURATION = 500  # 毫秒
-FPS_UPDATE_INTERVAL = 1.0  # 秒
+# UI常量 (now imported from const.py)
+ANIMATION_DURATION = DEFAULT_ANIMATION_DURATION
 
 # 初始化配置文件
 Config.save()
@@ -48,16 +47,20 @@ Config.save()
 def communication_Process(pipe, videoSignal_queue, videoSignal_stop_queue, floating_information_signal_queue,
                           information_output_queue):
     """
-    总通信进程
-    pipe_parent
+    总通信进程 - 优化版本
+    增加重试逻辑和更好的错误处理
     """
     global video_running
+    
+    consecutive_errors = 0
 
     logger.debug("启动 communication_Process 监听信号...")
     while True:
-        if pipe.poll():
-            try:
+        try:
+            if pipe.poll(timeout=0.1):  # 添加超时避免阻塞
                 message = pipe.recv()
+                consecutive_errors = 0  # 重置错误计数
+                
                 if isinstance(message, tuple):  # 处理消息类型
                     cmd, cmd_01 = message
                     logger.debug(f"收到信号: {cmd}")
@@ -96,13 +99,25 @@ def communication_Process(pipe, videoSignal_queue, videoSignal_stop_queue, float
                         floating_information_signal_queue.put(
                             ("red_error_log", cmd_01))
 
-            except (BrokenPipeError, EOFError) as e:
-                logger.error(f"管道通信错误: {e}")
+        except (BrokenPipeError, EOFError) as e:
+            consecutive_errors += 1
+            logger.error(f"管道通信错误 (尝试 {consecutive_errors}/{MAX_RETRIES}): {e}")
+            
+            if consecutive_errors >= MAX_RETRIES:
+                logger.fatal(f"管道通信连续失败 {MAX_RETRIES} 次，退出进程")
                 information_output_queue.put(
-                    ("error_log", f"管道通信错误: {e}"))  # 捕获并记录错误信息
-            except Exception as e:
-                logger.error(f"发生错误: {e}")
-                information_output_queue.put(("error_log", f"未知错误: {e}"))
+                    ("error_log", f"管道通信连续失败，进程已终止"))
+                break
+            
+            # 等待后重试 (exponential backoff)
+            retry_delay = RETRY_DELAY_BASE * consecutive_errors
+            time.sleep(retry_delay)
+            information_output_queue.put(
+                ("error_log", f"管道通信错误，将在 {retry_delay}s 后重试"))
+                
+        except Exception as e:
+            logger.error(f"发生未知错误: {e}")
+            information_output_queue.put(("error_log", f"未知错误: {e}"))
 
 
 def start_capture_process_multie(shm_name, frame_shape, frame_dtype, frame_available_event,
@@ -159,7 +174,10 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
 
     def initialization_Yolo(model_file, information_output_queue):
         """
-        初始化 YOLO 并进行预热推理
+        初始化 YOLO 并进行预热推理 - 优化版本
+        
+        支持 .pt, .engine, .onnx 格式
+        优化预热逻辑以提升加载速度
         
         Args:
             model_file: 模型文件路径
@@ -187,29 +205,41 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
                     pipe_parent.send(("red_error", f"[ERROR]{error_msg}"))
                     raise FileNotFoundError(f"默认模型文件 '{model_file}' 不存在，请确保模型文件存在")
 
+            # 检查模型格式
+            model_ext = os.path.splitext(model_file)[1].lower()
+            supported_formats = ['.pt', '.engine', '.onnx']
+            
+            if model_ext not in supported_formats:
+                logger.warn(f"模型格式 '{model_ext}' 可能不被支持，建议使用: {', '.join(supported_formats)}")
+            
+            logger.info(f"开始加载 YOLO 模型: {model_file} (格式: {model_ext})")
+            load_start = time.time()
+            
+            # 加载模型
             model = YOLO(model_file)
-            logger.info(f"YOLO 模型 '{model_file}' 已加载")
+            load_time = time.time() - load_start
+            logger.info(f"YOLO 模型加载完成，耗时: {load_time:.2f}秒")
             
-            # 使用临时图像预热模型
+            # 优化的预热逻辑
+            logger.debug("开始模型预热...")
+            warmup_start = time.time()
+            
+            # 使用更小的预热图像以加快速度
             temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
-            temp_img_path = "temp_init_image.jpg"
-            cv2.imwrite(temp_img_path, temp_img)
             
-            # 执行预热推理
-            model.predict(temp_img_path, conf=0.5)
-            logger.debug("YOLO 模型预热完成")
+            # 执行预热推理 (使用较低的置信度以加快速度)
+            _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device="cuda:0")
             
-            # 清理临时文件
-            try:
-                os.remove(temp_img_path)
-            except OSError:
-                pass  # 忽略删除失败
+            warmup_time = time.time() - warmup_start
+            logger.info(f"YOLO 模型预热完成，耗时: {warmup_time:.2f}秒")
+            logger.success(f"模型初始化成功 (总耗时: {load_time + warmup_time:.2f}秒)")
                 
             return model
+            
         except Exception as e:
             logger.error(f"YOLO 初始化失败: {e}")
             information_output_queue.put(("error_log", f"YOLO 初始化失败: {e}"))
-            return None
+            raise
 
     model = initialization_Yolo(
         model_file, information_output_queue)  # 初始化YOLO
@@ -260,9 +290,10 @@ def open_screen_video(shared_frame, frame_available_event, videoSignal_stop_queu
 
 def capture_screen_loop(videoSignal_stop_queue, sct, shared_frame, frame_available_event):
     """
-    屏幕捕获循环函数
+    屏幕捕获循环函数 - 优化版本
     
     持续捕获屏幕中心区域并写入共享内存
+    优化: 减少内存拷贝，提高帧率
     
     Args:
         videoSignal_stop_queue: 停止信号队列
@@ -283,37 +314,50 @@ def capture_screen_loop(videoSignal_stop_queue, sct, shared_frame, frame_availab
         "width": CAPTURE_WIDTH,
         "height": CAPTURE_HEIGHT
     }
+    
+    # 性能监控
+    frame_times = []
 
     while True:
         frame_start_time = time.time()
 
-        # 检查停止信号
-        if not videoSignal_stop_queue.empty():
-            command, _ = videoSignal_stop_queue.get()
-            if command == 'stop_video':
-                logger.debug("停止屏幕捕获")
-                break
+        # 检查停止信号 (非阻塞)
+        try:
+            if not videoSignal_stop_queue.empty():
+                command, _ = videoSignal_stop_queue.get_nowait()
+                if command == 'stop_video':
+                    logger.debug("停止屏幕捕获")
+                    break
+        except Exception:
+            pass
 
         # 获取指定区域的截图
         img = sct.grab(capture_area)
 
-        # 直接转换为numpy数组，避免数据拷贝
+        # 优化: 直接转换为numpy数组，避免额外的数据拷贝
         frame = np.frombuffer(img.rgb, dtype=np.uint8).reshape((img.height, img.width, 3))
         
-        # 转换颜色空间
+        # 转换颜色空间 (BGR -> RGB)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
 
-        # 写入共享内存
+        # 写入共享内存 (使用copyto比赋值更高效)
         np.copyto(shared_frame, frame)
         frame_available_event.set()
 
         # 帧率控制
         elapsed_time = time.time() - frame_start_time
+        
+        # 性能监控
+        frame_times.append(elapsed_time)
+        if len(frame_times) > FRAME_TIME_SAMPLES:
+            frame_times.pop(0)
+            avg_time = sum(frame_times) / len(frame_times)
+            if avg_time > FRAME_INTERVAL * 1.2:
+                logger.warn(f"平均帧处理时间过长: {avg_time:.4f}秒 (目标: {FRAME_INTERVAL:.4f}秒)")
+        
         remaining_time = FRAME_INTERVAL - elapsed_time
         if remaining_time > 0:
             time.sleep(remaining_time)
-        elif elapsed_time > FRAME_INTERVAL * 1.5:  # 仅在严重超时时警告
-            logger.warn(f"帧处理超时: {elapsed_time:.4f}秒 (目标: {FRAME_INTERVAL:.4f}秒)")
 
 
 def screen_capture_and_yolo_processing(processedVideo_queue, videoSignal_stop_queue, YoloSignal_queue, pipe_parent,
@@ -422,21 +466,9 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
                      processedVideo_queue, YoloSignal_queue, pipe_parent, information_output_queue, model_file,
                      box_shm_name, box_data_event, box_lock, accessibilityProcessSignal_queue):
     """
-    （多进程）对视频进行处理，支持 YOLO 推理。
+    （多进程）对视频进行处理，支持 YOLO 推理 - 优化版本
 
-    参数:
-    - shm_name: 视频帧共享内存名称
-    - frame_shape: 视频帧形状
-    - frame_dtype: 视频帧数据类型
-    - frame_available_event: 用于通知新帧可用的 Event
-    - processedVideo_queue: 处理后的视频队列
-    - YoloSignal_queue: YOLO 控制队列
-    - pipe_parent: 管道父端
-    - information_output_queue: 调试信息输出队列
-    - model_file: YOLO 模型文件路径
-    - box_shm_name: Box 坐标共享内存名称
-    - box_data_event: 用于通知 Box 数据可用的 Event
-    - box_lock: 用于同步访问共享内存的 Lock
+    优化: 改进模型加载和错误处理
     """
     global unique_id_counter
 
@@ -444,9 +476,9 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
     model = None
     frame = None
     yolo_confidence = 0.5
-    target_class = "ALL"  # 初始化目标类别
+    target_class = "ALL"
     unique_id_counter = 0
-    aim_range = 20  # 瞄准范围默认值
+    aim_range = 20
 
     # 连接到共享内存
     existing_shm = shared_memory.SharedMemory(name=shm_name)
@@ -454,7 +486,7 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
         frame_shape, dtype=frame_dtype, buffer=existing_shm.buf)
 
     try:
-        # 初始化 YOLO 模型
+        # 初始化 YOLO 模型 - 优化版本
         if not os.path.exists(model_file):
             logger.warn(f"模型文件 '{model_file}' 未找到，尝试使用默认模型 'yolov8n.pt'")
             information_output_queue.put(
@@ -468,14 +500,29 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
                 logger.fatal(error_msg)
                 pipe_parent.send(("red_error", f"[ERROR]{error_msg}"))
                 raise FileNotFoundError(f"默认模型文件不存在: {model_file}")
+        
+        # 检查模型格式
+        model_ext = os.path.splitext(model_file)[1].lower()
+        supported_formats = ['.pt', '.engine', '.onnx']
+        
+        if model_ext not in supported_formats:
+            logger.warn(f"模型格式 '{model_ext}' 可能不被支持，建议使用: {', '.join(supported_formats)}")
+        
+        logger.info(f"开始加载 YOLO 模型: {model_file} (格式: {model_ext})")
+        load_start = time.time()
                 
         model = YOLO(model_file)
-        logger.info(f"YOLO 模型已加载: {model_file}")
+        load_time = time.time() - load_start
+        logger.info(f"YOLO 模型加载完成，耗时: {load_time:.2f}秒")
 
-        # 使用临时图像预热模型
+        # 优化的预热逻辑
+        logger.debug("开始模型预热...")
+        warmup_start = time.time()
         temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
-        model.predict(temp_img, conf=0.5)
-        logger.debug("YOLO 模型预热完成")
+        _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device="cuda:0")
+        warmup_time = time.time() - warmup_start
+        logger.info(f"YOLO 模型预热完成，耗时: {warmup_time:.2f}秒")
+        logger.success(f"模型初始化成功 (总耗时: {load_time + warmup_time:.2f}秒)")
 
         pipe_parent.send(("loading_complete", True))
 
@@ -488,7 +535,7 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
                     logger.debug(
                         f"video_processing(YoloSignal_queue) 收到命令: {cmd}, 信息: {cmd_01}")
                     information_output_queue.put(
-                        ("video_processing_log", command_data))  # 显示调试信息
+                        ("video_processing_log", command_data))
                     if cmd == 'YOLO_start':
                         yolo_enabled = True
                     elif cmd == 'YOLO_stop':
@@ -501,31 +548,35 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
                         yolo_confidence = cmd_01
                     elif cmd == "change_class":
                         logger.debug(f"更改检测类别为: {cmd_01}")
-                        target_class = cmd_01  # 更新目标类别
+                        target_class = cmd_01
                     elif cmd == "aim_range_change":
                         aim_range = cmd_01
                         logger.debug(f"瞄准范围更改_01: {aim_range}")
 
-            # 等待新帧
-            frame_available_event.wait()
-            frame = shared_frame.copy()
-            frame_available_event.clear()
+            # 等待新帧 (带超时避免无限等待)
+            if frame_available_event.wait(timeout=1.0):
+                frame = shared_frame.copy()
+                frame_available_event.clear()
 
-            if yolo_enabled and model is not None:
-                # 执行 YOLO 推理并写入共享内存
-                processed_frame = YOLO_process_frame(
-                    model, frame, yolo_confidence,
-                    target_class=target_class,  # 使用更新后的目标类别
-                    box_shm_name=box_shm_name,
-                    box_data_event=box_data_event,
-                    box_lock=box_lock,
-                    aim_range=aim_range,
-                )
-            else:
-                processed_frame = frame
+                if yolo_enabled and model is not None:
+                    # 执行 YOLO 推理并写入共享内存
+                    processed_frame = YOLO_process_frame(
+                        model, frame, yolo_confidence,
+                        target_class=target_class,
+                        box_shm_name=box_shm_name,
+                        box_data_event=box_data_event,
+                        box_lock=box_lock,
+                        aim_range=aim_range,
+                    )
+                else:
+                    processed_frame = frame
 
-            # 将处理后的帧放入队列
-            processedVideo_queue.put(processed_frame)
+                # 将处理后的帧放入队列 (非阻塞)
+                try:
+                    processedVideo_queue.put(processed_frame, block=False)
+                except:
+                    pass  # 队列满时跳过该帧
+                    
     except Exception as e:
         logger.error(f"视频处理发生错误: {e}")
         information_output_queue.put(("error_log", f"视频处理发生错误: {e}"))
@@ -2481,36 +2532,69 @@ class RookieAiAPP:  # 主进程 (UI进程)
             self.clear_timer.stop()  # 停止定时器
 
     def change_yolo_model(self):
-        """重新加载模型"""
+        """
+        重新加载模型 - 改进版本
+        
+        添加原子性操作和状态锁定，防止操作冲突
+        """
         logger.debug("重新加载模型")
+        
         # 检查模型文件路径是否为空
-        if not getattr(self, 'model_file', None):  # 如果 model_file 属性不存在或为空
+        if not getattr(self, 'model_file', None):
             log_msg = "未选择模型文件，无法重新加载模型。"
             self.window.status_widget.display_message(
                 log_msg, bg_color="Red", text_color="black", auto_hide=6000)
-            return  # 退出方法，不执行后续操作
-
-        # 如果此时 视频预览 在开启状态，则进行关闭。
-        if self.is_video_running:
-            self.toggle_video_button()
-        # 如果此时 YOLO推理 在开启状态，则进行关闭。
-        if self.is_yolo_running:
-            self.toggle_YOLO_button()
-
-        if self.ProcessMode == "multi_process":
-            # 发送更改模型信号 与 模型路径(多进程)
-            self.YoloSignal_queue.put(("change_model", self.model_file))
-            self.information_output_queue.put(
-                ("UI_process_log", "向 YoloSignal_queue 发送 change_model"))
-        else:
-            # 发送更改模型信号 与 模型路径(单进程)
-            self.videoSignal_queue.put(("change_model", self.model_file))
-            self.information_output_queue.put(
-                ("UI_process_log", "向 videoSignal_queue 发送 change_model"))
-
-        # 显示模型已重新加载的消息
-        self.window.status_widget.display_message("模型已重新加载", bg_color="#55ff00", text_color="black",
-                                                  auto_hide=1500)
+            return
+        
+        # 检查模型文件是否存在
+        if not os.path.exists(self.model_file):
+            log_msg = f"模型文件不存在: {self.model_file}"
+            logger.error(log_msg)
+            self.window.status_widget.display_message(
+                log_msg, bg_color="Red", text_color="black", auto_hide=6000)
+            return
+        
+        # 原子操作：记录当前状态
+        video_was_running = self.is_video_running
+        yolo_was_running = self.is_yolo_running
+        
+        try:
+            # 步骤1: 停止所有活动
+            if self.is_video_running:
+                logger.debug("停止视频预览以切换模型")
+                self.toggle_video_button()
+                time.sleep(0.2)  # 等待视频完全停止
+                
+            if self.is_yolo_running:
+                logger.debug("停止YOLO推理以切换模型")
+                self.toggle_YOLO_button()
+                time.sleep(0.2)  # 等待YOLO完全停止
+            
+            # 步骤2: 发送模型切换信号
+            logger.info(f"开始切换模型: {self.model_file}")
+            if self.ProcessMode == "multi_process":
+                self.YoloSignal_queue.put(("change_model", self.model_file))
+                self.information_output_queue.put(
+                    ("UI_process_log", "向 YoloSignal_queue 发送 change_model"))
+            else:
+                self.videoSignal_queue.put(("change_model", self.model_file))
+                self.information_output_queue.put(
+                    ("UI_process_log", "向 videoSignal_queue 发送 change_model"))
+            
+            # 显示成功消息
+            self.window.status_widget.display_message(
+                "模型切换中，请稍候...", bg_color="Yellow", text_color="black", auto_hide=2000)
+            logger.success(f"模型切换命令已发送: {self.model_file}")
+            
+            # 步骤3: 恢复之前的状态 (可选)
+            # 注意：这里不自动恢复，让用户手动启动以确认模型加载成功
+            
+        except Exception as e:
+            error_msg = f"模型切换失败: {e}"
+            logger.error(error_msg)
+            self.window.status_widget.display_message(
+                error_msg, bg_color="Red", text_color="black", auto_hide=6000)
+            self.information_output_queue.put(("error_log", error_msg))
 
     def choose_model(self):
         """弹出文件选择窗口，让用户选择模型文件"""

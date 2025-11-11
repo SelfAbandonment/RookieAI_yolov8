@@ -10,6 +10,7 @@ import cv2
 import mss
 import numpy as np
 import pyautogui
+import torch
 import win32api
 import win32con
 from math import sqrt
@@ -43,6 +44,13 @@ ANIMATION_DURATION = DEFAULT_ANIMATION_DURATION
 
 # 初始化配置文件
 Config.save()
+
+# 检测可用的计算设备
+def get_device():
+    """检测并返回可用的计算设备 (cuda:0 或 cpu)"""
+    if torch.cuda.is_available():
+        return "cuda:0"
+    return "cpu"
 
 def communication_Process(pipe, videoSignal_queue, videoSignal_stop_queue, floating_information_signal_queue,
                           information_output_queue):
@@ -228,7 +236,8 @@ def start_capture_process_single(videoSignal_queue, videoSignal_stop_queue, info
             temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
             
             # 执行预热推理 (使用较低的置信度以加快速度)
-            _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device="cuda:0")
+            device = get_device()
+            _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device=device)
             
             warmup_time = time.time() - warmup_start
             logger.info(f"YOLO 模型预热完成，耗时: {warmup_time:.2f}秒")
@@ -519,7 +528,8 @@ def video_processing(shm_name, frame_shape, frame_dtype, frame_available_event,
         logger.debug("开始模型预热...")
         warmup_start = time.time()
         temp_img = np.zeros((CAPTURE_WIDTH, CAPTURE_HEIGHT, 3), dtype=np.uint8)
-        _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device="cuda:0")
+        device = get_device()
+        _ = model.predict(temp_img, conf=MODEL_WARMUP_CONF, verbose=False, device=device)
         warmup_time = time.time() - warmup_start
         logger.info(f"YOLO 模型预热完成，耗时: {warmup_time:.2f}秒")
         logger.success(f"模型初始化成功 (总耗时: {load_time + warmup_time:.2f}秒)")
@@ -610,13 +620,15 @@ def YOLO_process_frame(
                 classes = None  # 如果转换失败，则检测所有类别
 
         # 执行 YOLO 推理
+        device = get_device()
+        use_half = device.startswith("cuda")  # 仅在 CUDA 设备上使用半精度
         results = model.predict(
             frame,
             save=False,
-            device="cuda:0",
+            device=device,
             verbose=False,
             save_txt=False,
-            half=True,
+            half=use_half,
             conf=yolo_confidence,
             classes=classes  # 指定类别
         )

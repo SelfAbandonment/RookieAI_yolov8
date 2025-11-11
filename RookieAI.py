@@ -621,13 +621,14 @@ def YOLO_process_frame(
 
         # 执行 YOLO 推理
         device = get_device()
+        use_half = device.startswith("cuda")  # 仅在 CUDA 设备上使用半精度
         results = model.predict(
             frame,
             save=False,
             device=device,
             verbose=False,
             save_txt=False,
-            half=True,
+            half=use_half,
             conf=yolo_confidence,
             classes=classes  # 指定类别
         )
